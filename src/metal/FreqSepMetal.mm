@@ -79,7 +79,7 @@ public:
     // Scratch buffer by name, at least `floats` long.
     id<MTLBuffer> buf(const std::string& name, size_t floats)
     {
-        id<MTLBuffer>& b = _qs.buffers[name];
+        id<MTLBuffer> __strong& b = _qs.buffers[name];
         const NSUInteger bytes = std::max<size_t>(floats, 1) * sizeof(float);
         if (!b || b.length < bytes) b = [_device newBufferWithLength:bytes options:MTLResourceStorageModePrivate];
         return b;

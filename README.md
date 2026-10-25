@@ -1,4 +1,6 @@
-# Seperator
+![LineSeparator](docs/logo.jpg)
+
+# LineSeparator Skin
 
 Frekvensseparation til video som et OFX-plugin til DaVinci Resolve (og andre OFX-værter), inspireret af Greyscale Labs Serum.
 
@@ -36,7 +38,7 @@ Hent den seneste zip fra *Actions* (eller *Releases*), pak den ud og kopier `Sep
 - **Windows:** `C:\Program Files\Common Files\OFX\Plugins\`
 - **Linux:** `/usr/OFX/Plugins/`
 
-Genstart Resolve. Plugin'et ligger under *OpenFX → Seperator → Seperator Skin*.
+Genstart Resolve. Plugin'et ligger under *OpenFX → LineSeparator → LineSeparator Skin*.
 
 På macOS er bundlen kun ad-hoc signeret. Hvis Resolve ikke vil indlæse den efter download:
 

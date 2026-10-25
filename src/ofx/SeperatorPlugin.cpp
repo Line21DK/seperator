@@ -1,5 +1,6 @@
 // OFX wrapper around the frequency separation core (src/core/FreqSep.h).
-// Tested hosts: DaVinci Resolve (macOS/Windows/Linux). Float RGBA/RGB only.
+// Target host: DaVinci Resolve (macOS/Windows/Linux). Float RGBA/RGB only.
+// On macOS the whole pipeline runs on the GPU when the host offers Metal.
 #ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
@@ -13,6 +14,9 @@
 #include "ofxsImageEffect.h"
 
 #include "../core/FreqSep.h"
+#ifdef __APPLE__
+#include "../metal/FreqSepMetal.h"
+#endif
 
 #define kPluginName "Seperator Skin"
 #define kPluginGrouping "Seperator"
@@ -73,6 +77,10 @@ public:
 
 private:
     sep::Params paramsAt(double t) const;
+#ifdef __APPLE__
+    void renderMetal(const OFX::RenderArguments& args, OFX::Image& src, OFX::Image& dst, int srcCh, int dstCh,
+                     int maskSource, const sep::Params& p);
+#endif
 
     OFX::Clip *_dst, *_src, *_mask;
     OFX::DoubleParam *_separation, *_colorSmooth, *_edgeProtect, *_colorAmount, *_midtoneDetail, *_texture,
@@ -142,10 +150,17 @@ void SeperatorPlugin::render(const OFX::RenderArguments& args)
     if (w <= 0 || h <= 0) return;
 
     sep::Params p = paramsAt(args.time);
+    const int maskSource = choiceAt(_maskSource, args.time);
+
+#ifdef __APPLE__
+    if (args.isEnabledMetalRender) {
+        renderMetal(args, *src, *dst, srcCh, dstCh, maskSource, p);
+        return;
+    }
+#endif
 
     // Build the external mask plane (row 0 = bottom row of src, like the image).
     std::vector<float> mask;
-    const int maskSource = choiceAt(_maskSource, args.time);
     if (maskSource == eMaskSourceAlpha && srcCh == 4) {
         mask.resize(static_cast<size_t>(w) * h);
         for (int y = 0; y < h; ++y) {
@@ -188,6 +203,41 @@ void SeperatorPlugin::render(const OFX::RenderArguments& args)
     }
 }
 
+#ifdef __APPLE__
+// Images are MTLBuffers here; getPixelData() returns the buffer handle.
+void SeperatorPlugin::renderMetal(const OFX::RenderArguments& args, OFX::Image& src, OFX::Image& dst, int srcCh,
+                                  int dstCh, int maskSource, const sep::Params& p)
+{
+    const OfxRectI sb = src.getBounds(), db = dst.getBounds();
+    if (sb.x1 != db.x1 || sb.y1 != db.y1 || sb.x2 != db.x2 || sb.y2 != db.y2)
+        OFX::throwSuiteStatusException(kOfxStatErrUnsupported);
+    const int w = sb.x2 - sb.x1, h = sb.y2 - sb.y1;
+
+    sep::MetalImage s{src.getPixelData(), w, h, srcCh, src.getRowBytes() / static_cast<int>(sizeof(float))};
+    sep::MetalImage d{dst.getPixelData(), w, h, dstCh, dst.getRowBytes() / static_cast<int>(sizeof(float))};
+
+    sep::MetalMask mask;
+    std::unique_ptr<OFX::Image> m;
+    if (maskSource == eMaskSourceAlpha && srcCh == 4) {
+        mask = {s.buffer, 4, 3, s.rowStride, 0, 0, w, h};
+    } else if (maskSource == eMaskInput && _mask && _mask->isConnected()) {
+        m.reset(_mask->fetchImage(args.time));
+        if (m && m->getPixelDepth() == OFX::eBitDepthFloat) {
+            const OfxRectI mb = m->getBounds();
+            const int mc = channelsOf(m->getPixelComponents());
+            mask = {m->getPixelData(), mc, mc == 4 ? 3 : 0, m->getRowBytes() / static_cast<int>(sizeof(float)),
+                    sb.x1 - mb.x1, sb.y1 - mb.y1, mb.x2 - mb.x1, mb.y2 - mb.y1};
+        }
+    }
+
+    std::string err;
+    if (!sep::processMetal(args.pMetalCmdQ, s, d, mask.buffer ? &mask : nullptr, p, false, &err)) {
+        setPersistentMessage(OFX::Message::eMessageError, "", err);
+        OFX::throwSuiteStatusException(kOfxStatFailed);
+    }
+}
+#endif
+
 mDeclarePluginFactory(SeperatorPluginFactory, {}, {});
 
 OFX::DoubleParamDescriptor* defineDouble(OFX::ImageEffectDescriptor& desc, const char* name, const char* label,
@@ -226,6 +276,9 @@ void SeperatorPluginFactory::describe(OFX::ImageEffectDescriptor& desc)
     desc.setTemporalClipAccess(false);
     desc.setRenderTwiceAlways(false);
     desc.setSupportsMultipleClipPARs(false);
+#ifdef __APPLE__
+    desc.setSupportsMetalRender(true);
+#endif
 }
 
 void SeperatorPluginFactory::describeInContext(OFX::ImageEffectDescriptor& desc, OFX::ContextEnum /*context*/)

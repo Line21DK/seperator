@@ -5,7 +5,10 @@ if(APPLE)
   set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "")
 endif()
 
-project(Seperator VERSION 0.1.0 LANGUAGES CXX)
+project(Seperator VERSION 0.2.0 LANGUAGES CXX)
+if(APPLE)
+  enable_language(OBJCXX)
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -39,6 +42,21 @@ target_include_directories(Seperator PRIVATE
   ${openfx_SOURCE_DIR}/Support/include
   ${openfx_SOURCE_DIR}/Support/Library)
 target_link_libraries(Seperator PRIVATE seperator_core)
+
+if(APPLE)
+  # Metal kernels are embedded as source and compiled by the driver at first use.
+  set(KERNELS ${CMAKE_SOURCE_DIR}/src/metal/kernels.metal)
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${KERNELS})
+  file(READ ${KERNELS} KERNELS_SOURCE)
+  file(WRITE ${CMAKE_BINARY_DIR}/generated/MetalKernelsSource.h
+    "// Generated from src/metal/kernels.metal\nstatic const char* kMetalKernelsSource = R\"METAL(${KERNELS_SOURCE})METAL\";\n")
+
+  add_library(seperator_metal STATIC src/metal/FreqSepMetal.mm)
+  target_include_directories(seperator_metal PRIVATE ${CMAKE_BINARY_DIR}/generated)
+  target_compile_options(seperator_metal PRIVATE -fobjc-arc)
+  target_link_libraries(seperator_metal PUBLIC seperator_core "-framework Metal" "-framework Foundation")
+  target_link_libraries(Seperator PRIVATE seperator_metal)
+endif()
 set_target_properties(Seperator PROPERTIES PREFIX "" SUFFIX ".ofx"
   CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
 
@@ -63,3 +81,10 @@ enable_testing()
 add_executable(core_test tests/core_test.cpp)
 target_link_libraries(core_test PRIVATE seperator_core)
 add_test(NAME core_test COMMAND core_test)
+
+if(APPLE)
+  add_executable(metal_test tests/metal_test.mm)
+  target_compile_options(metal_test PRIVATE -fobjc-arc)
+  target_link_libraries(metal_test PRIVATE seperator_metal)
+  add_test(NAME metal_test COMMAND metal_test)
+endif()

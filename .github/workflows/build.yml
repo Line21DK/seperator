@@ -23,6 +23,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Compile Metal kernels offline (syntax check)
+        if: runner.os == 'macOS'
+        run: xcrun -sdk macosx metal -c src/metal/kernels.metal -o "$RUNNER_TEMP/kernels.air"
+
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 
@@ -30,7 +34,7 @@ jobs:
         run: cmake --build build --config Release --parallel
 
       - name: Test
-        run: ctest --test-dir build -C Release --output-on-failure
+        run: ctest --test-dir build -C Release --output-on-failure -V
 
       - name: Ad-hoc sign (macOS)
         if: runner.os == 'macOS'

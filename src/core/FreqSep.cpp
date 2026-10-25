@@ -1,5 +1,7 @@
 #include "FreqSep.h"
 
+#include "BlurPlan.h"
+
 #include <algorithm>
 #include <cmath>
 #include <functional>
@@ -32,19 +34,6 @@ struct Ctx {
     int w, h, threads;
     std::size_t size() const { return static_cast<std::size_t>(w) * h; }
 };
-
-// Radii of three box filters approximating a gaussian of the given sigma.
-void boxRadiiForGauss(float sigma, int radii[3])
-{
-    const int n = 3;
-    float wIdeal = std::sqrt(12.0f * sigma * sigma / n + 1.0f);
-    int wl = static_cast<int>(std::floor(wIdeal));
-    if (wl % 2 == 0) --wl;
-    int wu = wl + 2;
-    float mIdeal = (12.0f * sigma * sigma - n * wl * wl - 4.0f * n * wl - 3.0f * n) / (-4.0f * wl - 4.0f);
-    int m = static_cast<int>(std::lround(mIdeal));
-    for (int i = 0; i < n; ++i) radii[i] = ((i < m ? wl : wu) - 1) / 2;
-}
 
 void boxH(const Ctx& c, const float* in, float* out, int r)
 {
@@ -151,6 +140,22 @@ void upsample(const Ctx& c, const Ctx& lc, const Plane& in, int sub, Plane& out)
     });
 }
 
+// In-place gaussian blur of a full resolution plane. Large sigmas run at
+// reduced resolution and are bilinearly upsampled.
+void smooth(const Ctx& c, Plane& data, float sigma, Plane& tmp)
+{
+    if (sigma < 0.5f) return;
+    const int sub = smoothFactor(sigma);
+    if (sub == 1) {
+        gauss(c, data.data(), sigma, tmp);
+        return;
+    }
+    const Ctx sc{(c.w + sub - 1) / sub, (c.h + sub - 1) / sub, c.threads};
+    Plane small = downsample(c, sc, data, sub), stmp(sc.size());
+    gauss(sc, small.data(), sigma / sub, stmp);
+    upsample(c, sc, small, sub, data);
+}
+
 // Element-wise helper over whole planes.
 template <class F>
 void forEach(const Ctx& c, F f)
@@ -203,21 +208,13 @@ void process(const ImageView& src, const ImageView& dst, const float* mask, cons
     });
 
     // 1. Split: colour layer = blur, texture layer = remainder.
-    const float sigmaSep = std::max(0.5f, p.separation * scale);
+    const float sigmaSep = sigmaSeparation(p.separation, scale);
     Plane low[3], high[3];
-    // Large blurs run at reduced resolution and are upsampled; the texture
-    // layer is defined as the remainder, so recombination stays lossless.
-    const int subSep = std::clamp(static_cast<int>(sigmaSep / 3.0f), 1, 4);
-    const Ctx sc{(c.w + subSep - 1) / subSep, (c.h + subSep - 1) / subSep, threads};
+    // The texture layer is defined as the remainder, so recombination stays
+    // lossless however the blur is computed.
     for (int k = 0; k < 3; ++k) {
-        if (subSep == 1) {
-            low[k] = blurred(c, in[k], sigmaSep, tmp);
-        } else {
-            Plane small = downsample(c, sc, in[k], subSep), stmp(sc.size());
-            gauss(sc, small.data(), sigmaSep / subSep, stmp);
-            low[k].resize(N);
-            upsample(c, sc, small, subSep, low[k]);
-        }
+        low[k] = in[k];
+        smooth(c, low[k], sigmaSep, tmp);
         high[k].resize(N);
         forEach(c, [&](std::size_t i) { high[k][i] = in[k][i] - low[k][i]; });
         Plane().swap(in[k]);
@@ -233,9 +230,9 @@ void process(const ImageView& src, const ImageView& dst, const float* mask, cons
     //    The colour layer is already low-pass, so the filter coefficients are
     //    solved at reduced resolution ("fast guided filter") and upsampled.
     if (p.colorAmount > 0.0f && p.colorSmooth > 0.0f) {
-        const float sigmaG = std::max(0.5f, p.colorSmooth * scale * 0.5f);
-        const float eps = std::pow(10.0f, -2.0f - 3.0f * std::clamp(p.edgeProtect, 0.0f, 1.0f));
-        const int sub = std::clamp(static_cast<int>(std::min(sigmaG / 3.0f, sigmaSep)), 1, 8);
+        const float sigmaG = sigmaGuided(p.colorSmooth, scale);
+        const float eps = guidedEps(p.edgeProtect);
+        const int sub = guidedFactor(sigmaG, sigmaSep);
         const Ctx lc{(c.w + sub - 1) / sub, (c.h + sub - 1) / sub, threads};
         const std::size_t LN = lc.size();
         const float lsigma = sigmaG / sub;
@@ -278,7 +275,8 @@ void process(const ImageView& src, const ImageView& dst, const float* mask, cons
     // 3. Midtone detail: contrast of the band just below the texture layer.
     if (p.midtoneDetail != 0.0f) {
         for (int k = 0; k < 3; ++k) {
-            Plane base = blurred(c, low[k], sigmaSep * 3.0f, tmp);
+            Plane base = low[k];
+            smooth(c, base, sigmaSep * 3.0f, tmp);
             forEach(c, [&](std::size_t i) { low[k][i] += p.midtoneDetail * (low[k][i] - base[i]); });
         }
     }
@@ -289,7 +287,7 @@ void process(const ImageView& src, const ImageView& dst, const float* mask, cons
     //    make big dips, so the limiter fades out where the colour layer has a
     //    strong gradient.
     {
-        const float t = 0.12f * (1.0f - p.blemish) * (1.0f - p.blemish) + 0.012f;
+        const float t = blemishThreshold(p.blemish);
         const bool limit = p.blemish > 0.0f;
         Plane edge;
         if (limit) {
@@ -308,7 +306,7 @@ void process(const ImageView& src, const ImageView& dst, const float* mask, cons
                         grad[static_cast<std::size_t>(y) * c.w + x] = std::clamp(contrast / 0.06f, 0.0f, 1.0f);
                     }
             });
-            gauss(c, grad.data(), sigmaSep, tmp);
+            smooth(c, grad, sigmaSep, tmp);
             edge.swap(grad);
         }
         forEach(c, [&](std::size_t i) {
@@ -331,7 +329,8 @@ void process(const ImageView& src, const ImageView& dst, const float* mask, cons
         out[k].resize(N);
         forEach(c, [&](std::size_t i) { out[k][i] = low[k][i] + high[k][i]; });
         if (p.postSharpen > 0.0f) {
-            Plane soft = blurred(c, out[k], std::max(0.6f, 0.8f * scale), tmp);
+            Plane soft = out[k];
+            smooth(c, soft, sharpenSigma(scale), tmp);
             forEach(c, [&](std::size_t i) { out[k][i] += p.postSharpen * (out[k][i] - soft[i]); });
         }
     }
@@ -346,7 +345,7 @@ void process(const ImageView& src, const ImageView& dst, const float* mask, cons
                     m[i] = std::clamp(mask[i], 0.0f, 1.0f);
                 }
         });
-        gauss(c, m.data(), p.maskSoftness * scale, tmp);
+        smooth(c, m, p.maskSoftness * scale, tmp);
         const float mix = std::clamp(p.mix, 0.0f, 1.0f);
         forEach(c, [&](std::size_t i) {
             float v = std::clamp(m[i], 0.0f, 1.0f);
@@ -373,7 +372,7 @@ void process(const ImageView& src, const ImageView& dst, const float* mask, cons
             float satW = std::clamp((sat - 0.5f * minSat) / minSat, 0.0f, 1.0f);
             key[i] = hueW * satW;
         });
-        gauss(c, key.data(), std::max(1.0f, 2.0f * scale), tmp);
+        smooth(c, key, skinKeySigma(scale), tmp);
         forEach(c, [&](std::size_t i) { m[i] *= key[i]; });
     }
 

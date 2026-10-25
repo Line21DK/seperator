@@ -18,8 +18,8 @@
 #include "../metal/FreqSepMetal.h"
 #endif
 
-#define kPluginName "Seperator Skin"
-#define kPluginGrouping "Seperator"
+#define kPluginName "LineSeparator Skin"
+#define kPluginGrouping "LineSeparator"
 #define kPluginDescription \
     "Frequency separation for moving images. Splits the picture into a colour layer and a texture layer, " \
     "evens out the colour layer (blotches, redness, uneven tone) and keeps pores and fine detail."

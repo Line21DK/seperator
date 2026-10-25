@@ -6,7 +6,7 @@
   <key>CFBundleExecutable</key><string>Seperator.ofx</string>
   <key>CFBundleIdentifier</key><string>dk.line21.seperator</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-  <key>CFBundleName</key><string>Seperator</string>
+  <key>CFBundleName</key><string>LineSeparator</string>
   <key>CFBundlePackageType</key><string>BNDL</string>
   <key>CFBundleShortVersionString</key><string>@PROJECT_VERSION@</string>
   <key>CFBundleVersion</key><string>@PROJECT_VERSION@</string>

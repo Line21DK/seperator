@@ -70,6 +70,8 @@ else()
 endif()
 set(OFX_BUNDLE_DIR ${CMAKE_BINARY_DIR}/Seperator.ofx.bundle)
 configure_file(resources/Info.plist.in ${OFX_BUNDLE_DIR}/Contents/Info.plist @ONLY)
+# OFX hosts look for <plugin identifier>.png in Contents/Resources.
+configure_file(resources/icon.png ${OFX_BUNDLE_DIR}/Contents/Resources/dk.line21.seperator.skin.png COPYONLY)
 add_custom_command(TARGET Seperator POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E make_directory ${OFX_BUNDLE_DIR}/Contents/${OFX_ARCH_DIR}
   COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:Seperator> ${OFX_BUNDLE_DIR}/Contents/${OFX_ARCH_DIR}/

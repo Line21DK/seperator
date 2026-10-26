@@ -24,7 +24,9 @@ Billedet deles i et **farvelag** (lave frekvenser: tone, rødme, pletter) og et 
 | Post-Sharpen | Skærper de fineste detaljer efter sammensætningen. |
 | Mix | Samlet styrke. |
 
-**Masking**: Mask Source (hele billedet, Mask-input eller kildens alpha), Skin Key (blød hudtone-qualifier med hue, bredde og minimum mætning), Soften Mask og Invert Mask. I Resolve virker nodens egne windows og qualifier som normalt oveni.
+**Masking**: Mask Source (hele billedet, Mask-input, kildens alpha eller **Person (AI)**), Skin Key (blød hudtone-qualifier med hue, bredde og minimum mætning), Soften Mask og Invert Mask. I Resolve virker nodens egne windows og qualifier som normalt oveni.
+
+*Person (AI)* finder personerne i billedet med Apples Vision (person segmentation, kører på Neural Engine). Det kræver macOS 12 eller nyere. Kombineret med Skin Key rammer effekten kun huden på personer, ikke træ, sand eller andre hudfarvede ting i baggrunden. *Person Mask Quality* vælger mellem Fast, Balanced og Accurate. Masken beregnes kun igen, når billedet ændrer sig, så det er hurtigt at skrue på de andre kontroller. På Windows og Linux findes muligheden ikke endnu.
 
 **Color Management & View**: *Input Is* (gamma/log eller scene linear; ved linear sker separationen i et log-lignende rum) og *View* (Result, Color Layer, Texture Layer, Mask, Split Before/After).
 
@@ -69,19 +71,21 @@ python3 tools/pfm.py to-png out.pfm out.png
 ## Struktur
 
 - `src/core/` – selve algoritmen, uafhængig af OFX (separation, guided filter, blemish-limiter, hud-key).
+- `src/metal/` – samme pipeline som Metal-kernels (macOS).
+- `src/vision/` – AI-personmaske med Apple Vision (macOS).
 - `src/ofx/` – OFX-wrapper med parametre og clips.
 - `tools/` – kommandolinjeværktøj og PFM-konvertering.
 - `tests/` – tests af kernen på syntetiske billeder.
 
 ## Status og næste skridt
 
-Version 0.1 kører på CPU (flertrådet). Omtrent 0,8 s pr. 4K-frame på 4 kerner; 1080p er ca. 4× hurtigere.
+På macOS kører hele pipelinen på GPU'en med Metal (ca. 12 ms pr. 4K-frame på en M2 Max). På Windows og Linux kører den på CPU (ca. 0,8 s pr. 4K-frame på 4 kerner).
 
 Næste skridt:
 
-1. GPU-rendering (Metal på macOS, CUDA/OpenCL på Windows) for realtid.
+1. GPU-rendering på Windows (CUDA/OpenCL).
 2. Deflicker: tidslig udjævning af farvelaget på tværs af frames.
-3. Automatisk ansigtstracking og personmaske (ML-model) i stedet for hue-baseret hud-key.
+3. Ansigtstracking og ansigtsområder (pande, kinder, under øjnene) med Vision face landmarks; personmaske på Windows (ONNX).
 4. Relight: surface normals og virtuelle lyskilder, som i Serum v2.
 
-Testbilledet i `docs/` er NASA-portrættet af Eileen Collins (public domain, fra scikit-image).
+Testbillederne i `docs/` og `tests/data/` er NASA-portrættet af Eileen Collins (public domain, fra scikit-image).

@@ -3,6 +3,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 #include "../core/FreqSep.h"
 
@@ -23,6 +24,9 @@ struct MetalMask {
     int rowStride = 0;  // in floats
     int dx = 0, dy = 0;  // mask pixel = source pixel + (dx, dy)
     int width = 0, height = 0;
+    // Alternatively a mask in CPU memory: width x height floats, one channel,
+    // row 0 = first row of the source. Copied to the GPU per frame.
+    const float* host = nullptr;
 };
 
 // Encodes the whole pipeline on the host's command queue and commits it.
@@ -30,5 +34,10 @@ struct MetalMask {
 // fills err on failure.
 bool processMetal(void* commandQueue, const MetalImage& src, const MetalImage& dst, const MetalMask* mask,
                   const Params& p, bool wait, std::string* err);
+
+// Box-filtered RGB thumbnail of src (interleaved, row 0 = first row), read
+// back to the CPU. Waits for the GPU. Used for the person mask.
+bool thumbnailMetal(void* commandQueue, const MetalImage& src, int factor, std::vector<float>& rgb, int& width,
+                    int& height, std::string* err);
 
 }  // namespace sep

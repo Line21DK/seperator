@@ -52,6 +52,11 @@ struct OutInfo {
     int view, splitX, lineW, space;
 };
 
+struct ThumbInfo {
+    int w, h, channels, rowStride;
+    int factor, tw, th;
+};
+
 constant float kLogOffset = 0.01f;
 
 inline float toWork(float v, int space)
@@ -335,4 +340,26 @@ kernel void writeOutput(device const float* src [[buffer(0)]], device float* dst
     dp[1] = v.y;
     dp[2] = v.z;
     if (s.dstChannels == 4) dp[3] = s.srcChannels == 4 ? sp[3] : 1.0f;
+}
+
+// Box-filtered RGB thumbnail for the person mask (same as makeThumb in
+// src/vision/PersonMask.mm). Values stay in the source encoding.
+kernel void thumbnail(device const float* src [[buffer(0)]], device float* out [[buffer(1)]],
+                      constant ThumbInfo& s [[buffer(2)]], uint2 gid [[thread_position_in_grid]])
+{
+    GUARD(s.tw, s.th)
+    float3 acc = float3(0.0f);
+    for (int dy = 0; dy < s.factor; ++dy) {
+        int sy = min(s.h - 1, y * s.factor + dy);
+        for (int dx = 0; dx < s.factor; ++dx) {
+            int sx = min(s.w - 1, x * s.factor + dx);
+            device const float* p = src + sy * s.rowStride + sx * s.channels;
+            acc += float3(p[0], p[1], p[2]);
+        }
+    }
+    acc /= float(s.factor * s.factor);
+    int i = (y * s.tw + x) * 3;
+    out[i + 0] = acc.x;
+    out[i + 1] = acc.y;
+    out[i + 2] = acc.z;
 }

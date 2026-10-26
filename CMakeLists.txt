@@ -5,7 +5,7 @@ if(APPLE)
   set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "")
 endif()
 
-project(Seperator VERSION 0.2.0 LANGUAGES CXX)
+project(Seperator VERSION 0.3.0 LANGUAGES CXX)
 if(APPLE)
   enable_language(OBJCXX)
 endif()
@@ -56,6 +56,13 @@ if(APPLE)
   target_compile_options(seperator_metal PRIVATE -fobjc-arc)
   target_link_libraries(seperator_metal PUBLIC seperator_core "-framework Metal" "-framework Foundation")
   target_link_libraries(Seperator PRIVATE seperator_metal)
+
+  # AI person mask (Apple Vision, macOS 12+; weak-linked so 11 still loads).
+  add_library(seperator_vision STATIC src/vision/PersonMask.mm)
+  target_compile_options(seperator_vision PRIVATE -fobjc-arc)
+  target_link_libraries(seperator_vision PUBLIC seperator_core
+    "-weak_framework Vision" "-framework CoreVideo" "-framework Foundation")
+  target_link_libraries(Seperator PRIVATE seperator_vision)
 endif()
 set_target_properties(Seperator PROPERTIES PREFIX "" SUFFIX ".ofx"
   CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
@@ -89,4 +96,9 @@ if(APPLE)
   target_compile_options(metal_test PRIVATE -fobjc-arc)
   target_link_libraries(metal_test PRIVATE seperator_metal)
   add_test(NAME metal_test COMMAND metal_test)
+
+  add_executable(person_test tests/person_test.mm)
+  target_compile_options(person_test PRIVATE -fobjc-arc)
+  target_link_libraries(person_test PRIVATE seperator_vision seperator_metal "-framework ImageIO" "-framework CoreGraphics")
+  add_test(NAME person_test COMMAND person_test ${CMAKE_SOURCE_DIR}/tests/data/astronaut.jpg)
 endif()

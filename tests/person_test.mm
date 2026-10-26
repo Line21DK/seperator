@@ -139,9 +139,11 @@ int main(int argc, char** argv)
         const bool ok = sep::personMask(thumb, sep::WorkingSpace::AsIs, sep::PersonQuality::Balanced, w, h, mask, &err);
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         if (!ok) {
-            // CI runners have no GPU or Neural Engine; Vision cannot run there.
-            if (!MTLCreateSystemDefaultDevice()) {
-                std::printf("%s (no GPU), skipping\n", err.c_str());
+            // CI runners are VMs with at most a paravirtual GPU and no Neural
+            // Engine; Vision cannot run there.
+            id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+            if (!device || [device.name containsString:@"Paravirtual"]) {
+                std::printf("%s (GPU: %s), skipping\n", err.c_str(), device ? device.name.UTF8String : "none");
                 return 0;
             }
             std::printf("FAIL %s\n", err.c_str());

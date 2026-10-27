@@ -31,6 +31,7 @@ struct MaskInfo {
 struct SkinInfo { int w, h, space; float hue0, width, minSat; };
 struct OutInfo { int w, h, srcChannels, srcStride, dstChannels, dstStride, view, splitX, lineW, space; };
 struct ApplyInfo { int w, h, lw, lh, sub; float amount; };
+struct ThumbInfo { int w, h, channels, rowStride, factor, tw, th; };
 
 // Compiled pipelines per device, scratch buffers per command queue. Buffers
 // are reused frame to frame; work on one queue executes in order, so reuse
@@ -261,10 +262,22 @@ bool processMetal(void* commandQueue, const MetalImage& src, const MetalImage& d
 
         // 6. Strength map.
         id<MTLBuffer> m = E.buf("mask", N);
-        const bool hasMask = mask && mask->buffer;
+        const bool hasMask = mask && (mask->buffer || mask->host);
         MaskInfo mi{w, h, hasMask ? 1 : 0, 1, 0, 0, 0, 0, 0, 0, p.mix, p.invertMask ? 1 : 0};
         id<MTLBuffer> maskBuf = m;  // any valid buffer when there is no mask
-        if (hasMask) {
+        if (hasMask && mask->host) {
+            // A fresh buffer per frame: the previous frame may still be reading its own.
+            maskBuf = [device newBufferWithBytes:mask->host
+                                          length:size_t(mask->width) * mask->height * sizeof(float)
+                                         options:MTLResourceStorageModeShared];
+            mi.channels = 1;
+            mi.channelOffset = 0;
+            mi.rowStride = mask->width;
+            mi.dx = mask->dx;
+            mi.dy = mask->dy;
+            mi.mw = mask->width;
+            mi.mh = mask->height;
+        } else if (hasMask) {
             maskBuf = (__bridge id<MTLBuffer>)mask->buffer;
             mi.channels = mask->channels;
             mi.channelOffset = mask->channelOffset;
@@ -305,6 +318,44 @@ bool processMetal(void* commandQueue, const MetalImage& src, const MetalImage& d
                 return false;
             }
         }
+        return true;
+    }
+}
+
+bool thumbnailMetal(void* commandQueue, const MetalImage& src, int factor, std::vector<float>& rgb, int& width,
+                    int& height, std::string* err)
+{
+    @autoreleasepool {
+        id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)commandQueue;
+        id<MTLDevice> device = queue.device;
+        const int f = std::max(1, factor);
+        ThumbInfo ti{src.width, src.height, src.channels, src.rowStride, f, std::max(1, src.width / f),
+                     std::max(1, src.height / f)};
+        const size_t floats = size_t(ti.tw) * ti.th * 3;
+        id<MTLBuffer> out = [device newBufferWithLength:floats * sizeof(float) options:MTLResourceStorageModeShared];
+
+        id<MTLCommandBuffer> cmd;
+        {
+            std::lock_guard<std::mutex> lock(gMutex);
+            DeviceState& ds = gDevices[(__bridge void*)device];
+            if (!loadPipelines(device, ds, err)) return false;
+            QueueState& qs = gQueues[commandQueue];
+            cmd = [queue commandBuffer];
+            cmd.label = @"Seperator thumbnail";
+            id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+            Encoder E(device, enc, ds, qs);
+            E.run("thumbnail", {(__bridge id<MTLBuffer>)src.buffer, out}, ti, ti.tw, ti.th);
+            [enc endEncoding];
+            [cmd commit];
+        }
+        [cmd waitUntilCompleted];
+        if (cmd.status == MTLCommandBufferStatusError) {
+            if (err) *err = std::string("Metal thumbnail failed: ") + cmd.error.localizedDescription.UTF8String;
+            return false;
+        }
+        rgb.assign(static_cast<const float*>(out.contents), static_cast<const float*>(out.contents) + floats);
+        width = ti.tw;
+        height = ti.th;
         return true;
     }
 }

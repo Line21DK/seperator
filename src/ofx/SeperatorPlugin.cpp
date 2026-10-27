@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 #include "ofxsImageEffect.h"
@@ -16,6 +17,7 @@
 #include "../core/FreqSep.h"
 #ifdef __APPLE__
 #include "../metal/FreqSepMetal.h"
+#include "../vision/PersonMask.h"
 #endif
 
 #define kPluginName "LineSeparator Skin"
@@ -38,7 +40,7 @@ int choiceAt(OFX::ChoiceParam* c, double t)
     return v;
 }
 
-enum MaskSource { eMaskNone = 0, eMaskInput, eMaskSourceAlpha };
+enum MaskSource { eMaskNone = 0, eMaskInput, eMaskSourceAlpha, eMaskPerson };
 
 class SeperatorPlugin : public OFX::ImageEffect {
 public:
@@ -60,6 +62,7 @@ public:
         _mix = fetchDoubleParam("mix");
 
         _maskSource = fetchChoiceParam("maskSource");
+        _personQuality = fetchChoiceParam("personQuality");
         _skinKey = fetchBooleanParam("skinKey");
         _skinHue = fetchDoubleParam("skinHue");
         _skinHueWidth = fetchDoubleParam("skinHueWidth");
@@ -80,12 +83,20 @@ private:
 #ifdef __APPLE__
     void renderMetal(const OFX::RenderArguments& args, OFX::Image& src, OFX::Image& dst, int srcCh, int dstCh,
                      int maskSource, const sep::Params& p);
+    // Person mask for the frame behind `thumb`, reused while the frame and
+    // quality stay the same (slider tweaks re-render the same frame).
+    const std::vector<float>* personMask(const sep::Thumb& thumb, const sep::Params& p, sep::PersonQuality q,
+                                         int w, int h);
+
+    std::mutex _personMutex;
+    uint64_t _personKey = 0;
+    std::vector<float> _personMask;
 #endif
 
     OFX::Clip *_dst, *_src, *_mask;
     OFX::DoubleParam *_separation, *_colorSmooth, *_edgeProtect, *_colorAmount, *_midtoneDetail, *_texture,
         *_blemish, *_postSharpen, *_mix, *_skinHue, *_skinHueWidth, *_skinMinSat, *_maskSoftness, *_split;
-    OFX::ChoiceParam *_maskSource, *_workingSpace, *_view;
+    OFX::ChoiceParam *_maskSource, *_personQuality, *_workingSpace, *_view;
     OFX::BooleanParam *_skinKey, *_invertMask;
 };
 
@@ -159,9 +170,24 @@ void SeperatorPlugin::render(const OFX::RenderArguments& args)
     }
 #endif
 
+    sep::ImageView sv{static_cast<float*>(src->getPixelAddress(sb.x1, sb.y1)), w, h, srcCh,
+                      static_cast<std::ptrdiff_t>(src->getRowBytes() / static_cast<int>(sizeof(float)))};
+
     // Build the external mask plane (row 0 = bottom row of src, like the image).
     std::vector<float> mask;
-    if (maskSource == eMaskSourceAlpha && srcCh == 4) {
+    std::unique_lock<std::mutex> personLock;  // keeps the cached person mask stable while in use
+    const float* maskData = nullptr;
+    if (maskSource == eMaskPerson) {
+#ifdef __APPLE__
+        const auto q = static_cast<sep::PersonQuality>(choiceAt(_personQuality, args.time));
+        sep::Thumb thumb;
+        sep::makeThumb(sv, sep::thumbFactor(h, q), thumb);
+        personLock = std::unique_lock<std::mutex>(_personMutex);
+        if (const std::vector<float>* pm = personMask(thumb, p, q, w, h)) maskData = pm->data();
+#else
+        setPersistentMessage(OFX::Message::eMessageWarning, "", "The person mask is only available on macOS.");
+#endif
+    } else if (maskSource == eMaskSourceAlpha && srcCh == 4) {
         mask.resize(static_cast<size_t>(w) * h);
         for (int y = 0; y < h; ++y) {
             const float* s = static_cast<const float*>(src->getPixelAddress(sb.x1, sb.y1 + y));
@@ -184,10 +210,9 @@ void SeperatorPlugin::render(const OFX::RenderArguments& args)
     // Process the whole source into a scratch buffer (the filters need context
     // beyond the render window), then copy the render window out.
     std::vector<float> out(static_cast<size_t>(w) * h * dstCh);
-    sep::ImageView sv{static_cast<float*>(src->getPixelAddress(sb.x1, sb.y1)), w, h, srcCh,
-                      static_cast<std::ptrdiff_t>(src->getRowBytes() / static_cast<int>(sizeof(float)))};
     sep::ImageView dv{out.data(), w, h, dstCh, static_cast<std::ptrdiff_t>(w) * dstCh};
-    sep::process(sv, dv, mask.empty() ? nullptr : mask.data(), p);
+    if (!mask.empty()) maskData = mask.data();
+    sep::process(sv, dv, maskData, p);
 
     const OfxRectI db = dst->getBounds();
     const int x1 = std::max({args.renderWindow.x1, db.x1, sb.x1});
@@ -218,7 +243,23 @@ void SeperatorPlugin::renderMetal(const OFX::RenderArguments& args, OFX::Image& 
 
     sep::MetalMask mask;
     std::unique_ptr<OFX::Image> m;
-    if (maskSource == eMaskSourceAlpha && srcCh == 4) {
+    std::unique_lock<std::mutex> personLock;
+    if (maskSource == eMaskPerson) {
+        const auto q = static_cast<sep::PersonQuality>(choiceAt(_personQuality, args.time));
+        sep::Thumb thumb;
+        std::string err;
+        if (!sep::thumbnailMetal(args.pMetalCmdQ, s, sep::thumbFactor(h, q), thumb.rgb, thumb.width, thumb.height,
+                                 &err)) {
+            setPersistentMessage(OFX::Message::eMessageError, "", err);
+            OFX::throwSuiteStatusException(kOfxStatFailed);
+        }
+        personLock = std::unique_lock<std::mutex>(_personMutex);
+        if (const std::vector<float>* pm = personMask(thumb, p, q, w, h)) {
+            mask.host = pm->data();
+            mask.width = w;
+            mask.height = h;
+        }
+    } else if (maskSource == eMaskSourceAlpha && srcCh == 4) {
         mask = {s.buffer, 4, 3, s.rowStride, 0, 0, w, h};
     } else if (maskSource == eMaskInput && _mask && _mask->isConnected()) {
         m.reset(_mask->fetchImage(args.time));
@@ -231,10 +272,29 @@ void SeperatorPlugin::renderMetal(const OFX::RenderArguments& args, OFX::Image& 
     }
 
     std::string err;
-    if (!sep::processMetal(args.pMetalCmdQ, s, d, mask.buffer ? &mask : nullptr, p, false, &err)) {
+    if (!sep::processMetal(args.pMetalCmdQ, s, d, mask.buffer || mask.host ? &mask : nullptr, p, false, &err)) {
         setPersistentMessage(OFX::Message::eMessageError, "", err);
         OFX::throwSuiteStatusException(kOfxStatFailed);
     }
+}
+
+const std::vector<float>* SeperatorPlugin::personMask(const sep::Thumb& thumb, const sep::Params& p,
+                                                      sep::PersonQuality q, int w, int h)
+{
+    uint64_t key = sep::thumbHash(thumb);
+    key ^= (static_cast<uint64_t>(q) + 1) * 0x9E3779B97F4A7C15ull;
+    key ^= (static_cast<uint64_t>(p.space) << 8) ^ (static_cast<uint64_t>(w) << 16) ^ (static_cast<uint64_t>(h) << 40);
+    if (key == _personKey && _personMask.size() == static_cast<size_t>(w) * h) return &_personMask;
+
+    std::string err;
+    if (!sep::personMask(thumb, p.space, q, w, h, _personMask, &err)) {
+        _personKey = 0;
+        setPersistentMessage(OFX::Message::eMessageError, "", err);
+        return nullptr;
+    }
+    _personKey = key;
+    clearPersistentMessage();
+    return &_personMask;
 }
 #endif
 
@@ -338,7 +398,20 @@ void SeperatorPluginFactory::describeInContext(OFX::ImageEffectDescriptor& desc,
         c->appendOption("Whole Frame");
         c->appendOption("Mask Input");
         c->appendOption("Source Alpha");
+        c->appendOption("Person (AI)");
         c->setDefault(eMaskNone);
+        c->setParent(*mg);
+        page->addChild(*c);
+    }
+    {
+        OFX::ChoiceParamDescriptor* c = desc.defineChoiceParam("personQuality");
+        c->setLabels("Person Mask Quality", "Person Mask Quality", "Person Mask Quality");
+        c->setHint("Detail of the AI person mask (macOS 12+, Apple Vision). Accurate follows hair and fingers best "
+                   "but is slower.");
+        c->appendOption("Fast");
+        c->appendOption("Balanced");
+        c->appendOption("Accurate");
+        c->setDefault(static_cast<int>(1));
         c->setParent(*mg);
         page->addChild(*c);
     }
